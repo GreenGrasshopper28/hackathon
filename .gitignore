@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.venv/
+venv/
+.env
+pip-log.txt
+
+# Node
+node_modules/
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Data / generated artifacts
+backend/data/
+backend/static/plots/
+frontend/.cache/
+*.log
+
+# Mac / Windows
+*.swp
+
+# Credentials
+*.pem
+*.key
