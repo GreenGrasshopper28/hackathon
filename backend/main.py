@@ -1,3 +1,12 @@
+import warnings
+import matplotlib
+matplotlib.use("Agg")   
+import matplotlib.pyplot as plt
+import seaborn as sns
+warnings.filterwarnings("ignore", message="Starting a Matplotlib GUI outside of the main thread")
+warnings.filterwarnings("ignore", category=FutureWarning, module="seaborn")
+plt.rcParams["figure.max_open_warning"] = 0
+
 import os
 import io
 import json
@@ -13,6 +22,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller, grangercausalitytests
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 # Gemini SDK
 import google.generativeai as genai
@@ -92,7 +105,13 @@ def run_basic_eda(df: pd.DataFrame, n_top=5) -> Dict[str, Any]:
     out["columns"] = list(df.columns)
     out["schema"] = _infer_schema(df)
 
-    numeric = df.select_dtypes(include=[np.number])
+    # numeric: include true numeric dtypes + numeric-like object columns
+    numeric = df.select_dtypes(include=[np.number]).copy()
+    # detect numeric-like object columns and coerce
+    for c in df.columns:
+        if c not in numeric.columns and _numeric_columns_from_series(df[c], min_nonnull_ratio=0.15):
+            numeric[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce")
+
     if not numeric.empty:
         out["numeric_summary"] = numeric.describe().to_dict()
         corr = numeric.corr()
@@ -115,30 +134,61 @@ def run_basic_eda(df: pd.DataFrame, n_top=5) -> Dict[str, Any]:
     out["missing"] = df.isna().sum().to_dict()
     return out
 
+def _numeric_columns_from_series(series: pd.Series, min_nonnull_ratio: float = 0.2) -> bool:
+    """
+    Return True if a series contains at least `min_nonnull_ratio` coercible numerics.
+    """
+    try:
+        coerced = pd.to_numeric(series.astype(str).str.replace(",", ""), errors="coerce")
+    except Exception:
+        coerced = pd.to_numeric(series, errors="coerce")
+    nonnull = int(coerced.notna().sum())
+    total = max(1, len(series))
+    return (nonnull / total) >= float(min_nonnull_ratio)
 
+# -------- make_histograms ----------
 def make_histograms(df: pd.DataFrame, max_cols=6) -> List[str]:
     imgs = []
-    numeric = df.select_dtypes(include=[np.number])
-    cols = numeric.columns.tolist()[:max_cols]
+    candidates = []
+    for c in df.columns:
+        if _numeric_columns_from_series(df[c], min_nonnull_ratio=0.15):
+            candidates.append(c)
+    cols = candidates[:max_cols]
     for c in cols:
-        fig = plt.figure(figsize=(6, 4))
-        sns.histplot(df[c].dropna(), kde=True)
-        plt.title(f"Distribution: {c}")
-        filename = _safe_filename(f"hist_{c}")
-        imgs.append(_save_plot(fig, filename))
+        try:
+            # coerce and drop NaNs
+            data = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce").dropna()
+            if data.empty:
+                continue
+            fig = plt.figure(figsize=(6, 4))
+            sns.histplot(data, kde=True)
+            plt.title(f"Distribution: {c}")
+            filename = _safe_filename(f"hist_{c}")
+            imgs.append(_save_plot(fig, filename))
+        except Exception:
+            continue
     return imgs
 
-
+# -------- make_boxplots ----------
 def make_boxplots(df: pd.DataFrame, max_cols=6) -> List[str]:
     imgs = []
-    numeric = df.select_dtypes(include=[np.number])
-    cols = numeric.columns.tolist()[:max_cols]
+    candidates = []
+    for c in df.columns:
+        if _numeric_columns_from_series(df[c], min_nonnull_ratio=0.15):
+            candidates.append(c)
+    cols = candidates[:max_cols]
     for c in cols:
-        fig = plt.figure(figsize=(6, 4))
-        sns.boxplot(x=df[c].dropna())
-        plt.title(f"Boxplot: {c}")
-        filename = _safe_filename(f"box_{c}")
-        imgs.append(_save_plot(fig, filename))
+        try:
+            data = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce").dropna()
+            if data.empty:
+                continue
+            fig = plt.figure(figsize=(6, 4))
+            sns.boxplot(x=data)
+            plt.title(f"Boxplot: {c}")
+            filename = _safe_filename(f"box_{c}")
+            imgs.append(_save_plot(fig, filename))
+        except Exception:
+            continue
     return imgs
 
 
@@ -524,3 +574,28 @@ def chat(req: ChatRequest):
 
     llm_answer = call_llm_system(user_prompt, system_prompt=system_prompt)
     return {"answer": llm_answer, "tools": tool_outputs, "context": context}
+
+@app.post("/auth/google")
+def auth_google(body: Dict[str, str] = Body(...)):
+    """
+    Verify Google ID token (sent from client) and return basic user info.
+    Body: { "id_token": "<id_token>" }
+    """
+    token = body.get("id_token")
+    if not token:
+        return JSONResponse(status_code=400, content={"detail": "Missing id_token"})
+    try:
+        # NOTE: optionally: specify CLIENT_ID to verify audience
+        # CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+        # id_info = id_token.verify_oauth2_token(token, google_requests.Request(), CLIENT_ID)
+        id_info = id_token.verify_oauth2_token(token, google_requests.Request())
+        # id_info includes 'email', 'name', 'picture', 'sub' (user id)
+        user = {
+            "email": id_info.get("email"),
+            "name": id_info.get("name"),
+            "picture": id_info.get("picture"),
+            "sub": id_info.get("sub"),
+        }
+        return {"user": user}
+    except ValueError as e:
+        return JSONResponse(status_code=401, content={"detail": f"Invalid token: {str(e)}"})

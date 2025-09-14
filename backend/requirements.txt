@@ -12,3 +12,5 @@ statsmodels==0.14.0
 openai==1.4.0
 pmdarima==2.0.4    # optional but helpful for auto ARIMA (if heavy, remove and use simple ARIMA)
 google-generativeai
+google-auth==2.27.0
+
