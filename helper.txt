@@ -1,0 +1,1 @@
+in app.js remove the nowISO function to delete datetime
